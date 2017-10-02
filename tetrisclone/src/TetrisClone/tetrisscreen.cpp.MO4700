@@ -1,0 +1,471 @@
+#include <tetrisscreen.h>
+#include <QKeyEvent>
+#include <QApplication>
+#include <QDesktopWidget>
+#include <QImage>
+#include <QDebug>
+#include <QDateTime>
+#define TESTBRUSHES
+
+// CONSTRUCTORS
+TetrisScreen::TetrisScreen():QOpenGLWindow(),menuSelection(None),difSelection(None),
+                             sz(640,480),frame(640,480),backgroundLayer(640,480),foregroundLayer(640,480),activeBlockLayer(640,480),speed(1),playField(new quint16[20]())
+                             {
+    connect(this,SIGNAL(frameSwapped()),SLOT(update())); // enable vsync refresh
+    connect(this,SIGNAL(menuSelectionChanged(TetrisImageKey,TetrisImageKey)),
+                 SLOT(highlightMenuSelection(TetrisImageKey,TetrisImageKey)));
+    connect(this,SIGNAL(difficultySelectionChanged(TetrisImageKey,TetrisImageKey)),
+                 SLOT(highlightDifficultySelection(TetrisImageKey,TetrisImageKey)));
+    // add connection to the help button
+    connect(this,SIGNAL(playPressed(GameState)),SLOT(setGameState(GameState))); // pressing the play button takes the player                                                                 // to the difficulty selection screen
+    connect(this,SIGNAL(exitPressed()),qApp,SLOT(quit())); // pressing the exit button exits the game
+    connect(this,SIGNAL(startPressed(GameState)),SLOT(setGameState(GameState)));
+    connect(&activeBlock,SIGNAL(redrawRequested()),this,SLOT(handleRedrawRequest()));
+    connect(this,SIGNAL(blockReachedObstacle()),SLOT(setBlock()));
+    connect(&timer,SIGNAL(timeout()),this,SLOT(dropDown()));
+
+    imgCont = {  {Logo,  {QRect((frame.width()-350)/2,30,350,100)}},
+                 {Play,  {QRect((frame.width()-250)/2,170,250,70)}},
+                 {Help,  {QRect((frame.width()-250)/2,270,250,70)}},
+                 {Exit,  {QRect((frame.width()-250)/2,370,250,70)}},
+                 {Speed, {QRect(frame.width()/2-155,80,155,40)}},
+                 {SpeedLeftArrow,  {QRect(frame.width()/2+13,80,40,40)}                               },
+                 {SpeedRightArrow,  {QRect(frame.width()/2+117,80,40,40)}                              },
+                 {Start,  {QRect((frame.width()-160)/2,360,160,80)}                                     }
+              };
+    blockStyles = {  {BlockStyle1, QPixmap(cellWidth,cellHeight)}
+
+                  };
+    #ifdef TESTBRUSHES
+    blockStyles[BlockStyle1].fill(Qt::red);
+    #endif
+    setMaximumSize(sz); // preventing the window from being resized
+    setMinimumSize(sz);
+
+    QRect rec = QApplication::desktop()->geometry(); // acquiring the monitor's dimensions to put the
+                                                     // window in the center
+
+    qint16 width = rec.width(), height = rec.height();
+    setGeometry((width-sz.width())/2,(height-sz.height())/2,sz.width(),sz.height());
+
+    setTitle("Tetris");
+
+    setGameState(Menu);
+    setMenuSelection(Play);
+    setDifficultySelection(SpeedLeftArrow);
+    drawPlayfield();
+    foregroundLayer.fill(Qt::transparent);
+}
+TetrisImageItem::TetrisImageItem(QRect r /*= 0*/, QPixmap p /*= 0*/):rect(r),img(p){
+    if (img.isNull()){
+        img = QPixmap(r.width(),r.height());
+        img.fill(Qt::red);
+    }
+}
+
+// SLOTS
+void TetrisScreen::beginMenu(){
+    frame.fill(Qt::black);
+    painter.begin(&frame);
+    painter.drawPixmap(imgCont[Logo].rect,imgCont[Logo].img);
+    painter.drawPixmap(imgCont[Play].rect,imgCont[Play].img);
+    painter.drawPixmap(imgCont[Help].rect,imgCont[Help].img);
+    painter.drawPixmap(imgCont[Exit].rect,imgCont[Exit].img);
+    painter.end();
+}
+
+void TetrisScreen::beginDifficultySelect(){
+    frame.fill(Qt::black);
+    painter.begin(&frame);
+    painter.setPen(QPen(Qt::white,5,Qt::SolidLine,Qt::FlatCap,Qt::MiterJoin));
+    painter.drawText(QRect(frame.width()/2 - 150, 10, 300, 30),Qt::AlignCenter,"PICK YOUR POISON");
+    painter.drawRect(frame.width()/2 - 170, 50, 340, 400); // border around all other parts
+    painter.drawPixmap(imgCont[Speed].rect,imgCont[Speed].img);
+    painter.drawPixmap(imgCont[SpeedLeftArrow].rect,imgCont[SpeedLeftArrow].img);
+    painter.setPen(QPen(Qt::white,0,Qt::SolidLine,Qt::FlatCap,Qt::MiterJoin));
+    painter.drawRect(frame.width()/2 + 65, 80, 40, 40); // border around speed level, replace with image
+    drawSpeed();
+    painter.drawPixmap(imgCont[SpeedRightArrow].rect,imgCont[SpeedRightArrow].img);
+    painter.drawPixmap(imgCont[Start].rect,imgCont[Start].img);
+    painter.end();
+}
+
+void TetrisScreen::beginGameplay(){       
+        spawnBlock();
+        mergeLayersToFrame();
+}
+
+void TetrisScreen::setGameState(GameState s){
+    state = s;
+    switch (state){
+    case Menu: beginMenu(); break;
+    case Difficulty: beginDifficultySelect(); break;
+    case Gameplay: beginGameplay(); break;
+    }
+}
+
+void TetrisScreen::setMenuSelection(TetrisImageKey s){
+    TetrisImageKey old = menuSelection;
+    menuSelection = s;
+    emit menuSelectionChanged(old,menuSelection);
+}
+
+void TetrisScreen::setDifficultySelection(TetrisImageKey s){
+    TetrisImageKey old = difSelection;
+    difSelection = s;
+    emit difficultySelectionChanged(old,difSelection);
+}
+
+void TetrisScreen::pressMenuButton(){
+    switch(menuSelection){
+    case Play: emit playPressed(Difficulty); break;
+    case Help: emit helpPressed(); break;
+    case Exit: emit exitPressed(); break;
+    default: break;
+    }
+}
+
+void TetrisScreen::pressDifficultyButton(){
+
+    switch(difSelection){
+    case SpeedLeftArrow: speed == 1 ? speed = 9 : speed--; drawSpeed(); break;
+    case SpeedRightArrow: speed == 9 ? speed = 1 : speed++; drawSpeed();  break;
+    case Start: emit startPressed(Gameplay); break;
+    default: break;
+    }
+}
+//
+// EVENTS
+void TetrisScreen::keyPressEvent(QKeyEvent *event){
+    if (!event->isAutoRepeat())
+    switch(state){
+    case Menu: menuKeyPressEvent(event); break;
+    case Difficulty: difficultyKeyPressEvent(event); break;
+    case Gameplay: gameplayKeyPressEvent(event); break;
+    }
+}
+
+void TetrisScreen::keyReleaseEvent(QKeyEvent *event){
+    switch(state){
+    class Menu: break;
+    class Difficulty: gameplayKeyReleaseEvent(event);
+    class Gameplay: break;
+    }
+}
+
+void gameplayKeyReleaseEvent(QKeyEvent *event){
+
+}
+
+void TetrisScreen::menuKeyPressEvent(QKeyEvent *event){
+    switch(event->key()){
+    case Qt::Key_Up: if (menuSelection - 1 < Play) setMenuSelection(Exit);
+                     else setMenuSelection(TetrisImageKey(menuSelection - 1));
+                     break;
+    case Qt::Key_Down: if (menuSelection + 1 > Exit) setMenuSelection(Play);
+                       else setMenuSelection(TetrisImageKey(menuSelection + 1));
+                       break;
+    case Qt::Key_Enter:
+    case Qt::Key_Return: pressMenuButton();
+    }
+}
+
+void TetrisScreen::difficultyKeyPressEvent(QKeyEvent *event){ // rework the whole selection layout, this shit sucks
+    switch(event->key()){
+    case Qt::Key_Up: if (difSelection - 2 < SpeedLeftArrow) setDifficultySelection(Start);
+                     else setDifficultySelection(TetrisImageKey(difSelection - 2));
+                     break;
+    case Qt::Key_Down: if (difSelection == Start) setDifficultySelection(SpeedLeftArrow);
+                       else setDifficultySelection(Start);
+                       break;
+    case Qt::Key_Left:  if (difSelection == SpeedLeftArrow) setDifficultySelection(TetrisImageKey(difSelection + 1));
+                   else if (difSelection == SpeedRightArrow) setDifficultySelection(TetrisImageKey(difSelection - 1));
+                        break;
+    case Qt::Key_Right: if (difSelection == SpeedRightArrow) setDifficultySelection(TetrisImageKey(difSelection - 1));
+                   else if (difSelection == SpeedLeftArrow) setDifficultySelection(TetrisImageKey(difSelection + 1));
+                        break;
+    case Qt::Key_Enter:
+    case Qt::Key_Return: pressDifficultyButton();
+    }
+}
+
+void TetrisScreen::gameplayKeyPressEvent(QKeyEvent *event){
+    switch(event->key()){
+    case Qt::Key_Up: /* instadrop */ break;
+    case Qt::Key_Left: tryToMove(-1,0); break;
+    case Qt::Key_Right: tryToMove(1,0); break;
+    case Qt::Key_Down: dropDown(); break;
+    case Qt::Key_A: tryToRotate(activeBlock.blockOrientation() == BlockInfo::BlockOrientation::Up ? BlockInfo::BlockOrientation::Left : BlockInfo::BlockOrientation(activeBlock.blockOrientation()-1)); break;
+    case Qt::Key_D: tryToRotate(activeBlock.blockOrientation() == BlockInfo::BlockOrientation::Left ? BlockInfo::BlockOrientation::Up : BlockInfo::BlockOrientation(activeBlock.blockOrientation()+1)); break;
+    //case Qt::Key_Enter:
+    //case Qt::Key_Return: setGameState(Menu); // temporary
+    }
+}
+
+//
+
+void TetrisScreen::highlightMenuSelection(TetrisImageKey Old, TetrisImageKey New){
+    highlight(Old,New);
+    if (state == Menu){
+      painter.begin(&frame);
+      painter.drawPixmap(imgCont[Old].rect,imgCont[Old].img);
+      painter.drawPixmap(imgCont[New].rect,imgCont[New].img);
+      painter.end();
+    }
+}
+void TetrisScreen::highlightDifficultySelection(TetrisImageKey Old, TetrisImageKey New){
+    highlight(Old,New);
+    if (state == Difficulty){
+      painter.begin(&frame);
+      painter.drawPixmap(imgCont[Old].rect,imgCont[Old].img);
+      painter.drawPixmap(imgCont[New].rect,imgCont[New].img);
+      painter.end();
+    }
+}
+
+void TetrisScreen::highlight(TetrisImageKey Old, TetrisImageKey New){
+    if (Old != None){
+    #ifdef TESTBRUSHES
+      imgCont[Old].img.fill(Qt::red);
+    }
+    imgCont[New].img.fill(Qt::white);
+    #else
+      QImage image(imgCont[New].img.toImage());
+      image.invertPixels();
+      imgCont[New].img.convertFromImage(image);
+    }
+    #endif
+}
+
+void TetrisScreen::drawSpeed(){
+    bool wasNotActive = false;
+    if (!painter.isActive()){
+      wasNotActive = true;
+      painter.begin(&frame);
+      painter.setPen(Qt::white);
+    }
+    painter.setBrush(Qt::black);
+    painter.drawRect(frame.width()/2 + 65, 80, 40, 40);
+    painter.drawText(QRect(frame.width()/2 + 65, 80, 40, 40),Qt::AlignCenter,QString::number(speed));
+    if (wasNotActive) painter.end();
+}
+
+void TetrisScreen::drawPlayfield(){
+    backgroundLayer.fill(Qt::black);
+    painter.begin(&backgroundLayer);
+    painter.setPen(QPen(Qt::gray,0,Qt::SolidLine,Qt::FlatCap,Qt::MiterJoin));
+    painter.setBrush(Qt::transparent);
+    for (int i = 0; i < pfieldHeight; i++)
+      for (int j = 0; j < pfieldWidth; j++)
+        painter.drawRect(PFIELD_ORIGIN_X + cellWidth*j,PFIELD_ORIGIN_Y + cellHeight*i, cellWidth, cellHeight);
+    painter.end();
+}
+
+void TetrisScreen::mergeLayersToFrame(){
+    frame.fill(Qt::black);
+    painter.begin(&frame);
+    painter.drawPixmap(0,0,backgroundLayer);
+    //painter.drawPixmap(0,0,foregroundLayer);
+    painter.drawPixmap(0,0,activeBlockLayer);
+    painter.end();
+}
+
+// BLOCK RELATED FUNCTIONS
+
+void TetrisScreen::spawnBlock(){
+    qsrand(QDateTime::currentMSecsSinceEpoch());
+    activeBlock.setNewBlock(BlockInfo::BlockType(qrand() % 7));
+    drawBlock(activeBlockLayer);
+    timer.start(1400 - speed*100);
+}
+
+void BlockInfo::setNewBlock(BlockType t){
+    b_type = t;
+    b_orient = Up;
+    blocks.clear();
+    switch(b_type){
+    case I: blocks << QPoint(3,0) << QPoint(4,0) << QPoint(5,0) << QPoint(6,0); break;
+    case J: blocks << QPoint(3,0) << QPoint(4,0) << QPoint(5,0) << QPoint(5,1); break;
+    case L: blocks << QPoint(3,1) << QPoint(3,0) << QPoint(4,0) << QPoint(5,0); break;
+    case O: blocks << QPoint(4,0) << QPoint(5,0) << QPoint(5,1) << QPoint(4,1); break;
+    case S: blocks << QPoint(3,1) << QPoint(4,1) << QPoint(4,0) << QPoint(5,0); break;
+    case T: blocks << QPoint(3,0) << QPoint(4,1) << QPoint(5,0) << QPoint(4,0); break;
+    case Z: blocks << QPoint(3,0) << QPoint(4,0) << QPoint(4,1) << QPoint(5,1); break;
+    }
+}
+
+void TetrisScreen::handleRedrawRequest(){
+    drawBlock(activeBlockLayer);
+}
+
+void TetrisScreen::drawBlock(QPixmap& layer){
+    activeBlockLayer.fill(Qt::transparent);
+    painter.begin(&layer);
+    QVector<QPoint> blocks = activeBlock.getBlocks();
+    foreach (QPoint p, blocks){
+      painter.drawPixmap(PFIELD_ORIGIN_X + cellWidth*p.x(),PFIELD_ORIGIN_Y + cellHeight*p.y(), cellWidth, cellHeight, blockStyles[BlockStyle1]);
+    }
+    painter.end();
+    mergeLayersToFrame();
+}
+
+bool TetrisScreen::isCellOccupied(const QPoint& p){
+    return (p.x() < 0 || p.x() >= pfieldWidth || p.y() < 0 || p.y() >= pfieldHeight) || (playField[p.y()] & (1 << (pfieldWidth - p.x() - 1)));
+}
+
+bool TetrisScreen::tryToMove(qint8 xOffset, qint8 yOffset){
+    auto blocks = activeBlock.getBlocks();
+    for (auto &p : blocks){
+        if (isCellOccupied({p.x() + xOffset, p.y() + yOffset})) return false;
+    }
+    activeBlock.moveBlock(xOffset,yOffset);
+    return true;
+}
+
+void TetrisScreen::dropDown(){
+    if(!tryToMove(0,1)) emit blockReachedObstacle();
+}
+
+bool TetrisScreen::tryToRotate(BlockInfo::BlockOrientation orient){
+    auto rotBlocks = activeBlock.getRotatedBlocks(orient);
+    for (auto &p : rotBlocks){
+        if (isCellOccupied(p)) return false;
+    }
+    activeBlock.rotateBlock(orient, rotBlocks);
+    return true;
+}
+
+void BlockInfo::moveBlock(qint8 xOffset, qint8 yOffset){
+    for (auto &p : blocks){
+      p.setX(p.x()+xOffset);
+      p.setY(p.y()+yOffset);
+    }
+    emit redrawRequested();
+}
+
+
+void BlockInfo::rotateBlock(BlockOrientation orient, const QVector<QPoint>& rotBlocks){
+    b_orient = orient;
+    blocks = rotBlocks;
+    emit redrawRequested();
+}
+
+const QVector<QPoint> BlockInfo::getRotatedBlocks(BlockOrientation orient){
+    QVector<QPoint> rotBlocks = blocks;
+    switch(b_type){
+    case I: if (orient == Left || orient == Right){
+              for (quint8 i = 0; i < 4; i++){
+                rotBlocks[i].setX(rotBlocks[2].x());
+                rotBlocks[i].setY(rotBlocks[2].y() + (i-2));
+              }
+            }
+            else{
+              for (quint8 i = 0; i < 4; i++){
+                rotBlocks[i].setY(rotBlocks[2].y());
+                rotBlocks[i].setX(rotBlocks[2].x() + (i-2));
+              }
+            }
+            break;
+    case J: switch(orient){
+            case Up: rotBlocks[0].setX(rotBlocks[1].x()-1); rotBlocks[0].setY(rotBlocks[1].y());
+                     rotBlocks[2].setX(rotBlocks[1].x()+1); rotBlocks[2].setY(rotBlocks[1].y());
+                     rotBlocks[3].setX(rotBlocks[2].x()); rotBlocks[3].setY(rotBlocks[2].y()+1);
+                     break;
+            case Right: rotBlocks[0].setX(rotBlocks[1].x()); rotBlocks[0].setY(rotBlocks[1].y()-1);
+                        rotBlocks[2].setX(rotBlocks[1].x()); rotBlocks[2].setY(rotBlocks[1].y()+1);
+                        rotBlocks[3].setX(rotBlocks[2].x()-1); rotBlocks[3].setY(rotBlocks[2].y());
+                        break;
+            case Down: rotBlocks[0].setX(rotBlocks[1].x()+1); rotBlocks[0].setY(rotBlocks[1].y());
+                       rotBlocks[2].setX(rotBlocks[1].x()-1); rotBlocks[2].setY(rotBlocks[1].y());
+                       rotBlocks[3].setX(rotBlocks[2].x()); rotBlocks[3].setY(rotBlocks[2].y()-1);
+                       break;
+            case Left:  rotBlocks[0].setX(rotBlocks[1].x()); rotBlocks[0].setY(rotBlocks[1].y()+1);
+                        rotBlocks[2].setX(rotBlocks[1].x()); rotBlocks[2].setY(rotBlocks[1].y()-1);
+                        rotBlocks[3].setX(rotBlocks[2].x()+1); rotBlocks[3].setY(rotBlocks[2].y());
+                        break;
+            }
+            break;
+    case L: switch(orient){
+            case Up: rotBlocks[3].setX(rotBlocks[2].x()+1); rotBlocks[3].setY(rotBlocks[2].y());
+                     rotBlocks[1].setX(rotBlocks[2].x()-1); rotBlocks[1].setY(rotBlocks[2].y());
+                     rotBlocks[0].setX(rotBlocks[1].x()); rotBlocks[0].setY(rotBlocks[1].y()+1);
+                     break;
+            case Right: rotBlocks[3].setX(rotBlocks[2].x()); rotBlocks[3].setY(rotBlocks[2].y()+1);
+                        rotBlocks[1].setX(rotBlocks[2].x()); rotBlocks[1].setY(rotBlocks[2].y()-1);
+                        rotBlocks[0].setX(rotBlocks[1].x()-1); rotBlocks[0].setY(rotBlocks[1].y());
+                        break;
+            case Down: rotBlocks[3].setX(rotBlocks[2].x()-1); rotBlocks[3].setY(rotBlocks[2].y());
+                       rotBlocks[1].setX(rotBlocks[2].x()+1); rotBlocks[1].setY(rotBlocks[2].y());
+                       rotBlocks[0].setX(rotBlocks[1].x()); rotBlocks[0].setY(rotBlocks[1].y()-1);
+                       break;
+            case Left:  rotBlocks[3].setX(rotBlocks[2].x()); rotBlocks[3].setY(rotBlocks[2].y()-1);
+                        rotBlocks[1].setX(rotBlocks[2].x()); rotBlocks[1].setY(rotBlocks[2].y()+1);
+                        rotBlocks[0].setX(rotBlocks[1].x()+1); rotBlocks[0].setY(rotBlocks[1].y());
+                        break;
+            }
+            break;
+    case S: if (orient == Up || orient == Down){
+              rotBlocks[3].setX(rotBlocks[2].x()+1); rotBlocks[3].setY(rotBlocks[2].y());
+              rotBlocks[1].setX(rotBlocks[2].x()); rotBlocks[1].setY(rotBlocks[2].y()+1);
+              rotBlocks[0].setX(rotBlocks[1].x()-1); rotBlocks[0].setY(rotBlocks[1].y());
+            }
+            else {
+              rotBlocks[3].setX(rotBlocks[2].x()); rotBlocks[3].setY(rotBlocks[2].y()-1);
+              rotBlocks[1].setX(rotBlocks[2].x()+1); rotBlocks[1].setY(rotBlocks[2].y());
+              rotBlocks[0].setX(rotBlocks[1].x()); rotBlocks[0].setY(rotBlocks[1].y()+1);
+            }
+            break;
+    case Z: if (orient == Up || orient == Down){
+              rotBlocks[3].setX(rotBlocks[2].x()+1); rotBlocks[3].setY(rotBlocks[2].y());
+              rotBlocks[1].setX(rotBlocks[2].x()); rotBlocks[1].setY(rotBlocks[2].y()-1);
+              rotBlocks[0].setX(rotBlocks[1].x()-1); rotBlocks[0].setY(rotBlocks[1].y());
+            }
+            else {
+              rotBlocks[3].setX(rotBlocks[2].x()); rotBlocks[3].setY(rotBlocks[2].y()+1);
+              rotBlocks[1].setX(rotBlocks[2].x()+1); rotBlocks[1].setY(rotBlocks[2].y());
+              rotBlocks[0].setX(rotBlocks[1].x()); rotBlocks[0].setY(rotBlocks[1].y()-1);
+            }
+            break;
+    case T: switch(orient){
+            case Up: rotBlocks[0].setX(rotBlocks[3].x()-1); rotBlocks[0].setY(rotBlocks[3].y());
+                     rotBlocks[1].setX(rotBlocks[3].x()); rotBlocks[1].setY(rotBlocks[3].y()+1);
+                     rotBlocks[2].setX(rotBlocks[3].x()+1); rotBlocks[2].setY(rotBlocks[3].y());
+                     break;
+            case Right: rotBlocks[0].setX(rotBlocks[3].x()); rotBlocks[0].setY(rotBlocks[3].y()-1);
+                        rotBlocks[1].setX(rotBlocks[3].x()-1); rotBlocks[1].setY(rotBlocks[3].y());
+                        rotBlocks[2].setX(rotBlocks[3].x()); rotBlocks[2].setY(rotBlocks[3].y()+1);
+                        break;
+            case Down: rotBlocks[0].setX(rotBlocks[3].x()+1); rotBlocks[0].setY(rotBlocks[3].y());
+                       rotBlocks[1].setX(rotBlocks[3].x()); rotBlocks[1].setY(rotBlocks[3].y()-1);
+                       rotBlocks[2].setX(rotBlocks[3].x()-1); rotBlocks[2].setY(rotBlocks[3].y());
+                       break;
+            case Left: rotBlocks[0].setX(rotBlocks[3].x()); rotBlocks[0].setY(rotBlocks[3].y()+1);
+                       rotBlocks[1].setX(rotBlocks[3].x()+1); rotBlocks[1].setY(rotBlocks[3].y());
+                       rotBlocks[2].setX(rotBlocks[3].x()); rotBlocks[2].setY(rotBlocks[3].y()-1);
+                       break;
+            }
+            break;
+    case O: break;
+    }
+    return rotBlocks;
+}
+
+void TetrisScreen::setBlock(){
+    timer.stop();
+    activeBlockLayer.fill(Qt::transparent);
+    drawBlock(backgroundLayer);
+    auto blocks = activeBlock.getBlocks();
+    for (auto &p : blocks){
+      playField[p.y()] = playField[p.y()] | (1 << (pfieldWidth - p.x() - 1));
+    }
+    // if a line is formed, do somerthing
+    spawnBlock();
+}
+
+
+//
+void TetrisScreen::paintGL(){
+    painter.begin(this);
+    painter.drawPixmap(0,0,width(),height(),frame);
+    painter.end();
+}
