@@ -1,6 +1,6 @@
 # tetris-clone
-A WIP clone of Tetris I made for fun!
+A WIP clone of Tetris I made for fun!;
 Controls:
-Arrow Keys - Move/Accelerate drop
-Enter - Select option
-A/D - Flip blocks
+Arrow Keys - Move/Accelerate drop;
+Enter - Select option;
+A/D - Flip blocks;
