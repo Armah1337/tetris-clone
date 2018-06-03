@@ -1,7 +1,5 @@
 #include <QApplication>
-#include <QDesktopWidget>
-#include <QDebug>
-#include <tetrisscreen.h>
+#include "tetrisscreen.h"
 
 int main(int argc, char* argv[]){
     QApplication app(argc,argv);

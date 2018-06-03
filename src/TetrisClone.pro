@@ -1,9 +1,14 @@
 SOURCES += \
     main.cpp \
-    tetrisscreen.cpp
-TARGET = app
+    tetrisscreen.cpp \
+    blockinfo.cpp \
+    tetrisimageitem.cpp
+TARGET = tetrisclone
+TEMPLATE = app
 
 QT += widgets
 
 HEADERS += \
-    tetrisscreen.h
+    tetrisscreen.h \
+    blockinfo.h \
+    tetrisimageitem.h
